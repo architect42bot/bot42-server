@@ -1,0 +1,8 @@
+{
+  "Observer": "Monitors signal trends",
+  "Sentinel": "Detects suppression anomalies",
+  "Mirror": "Cross-posts to networks",
+  "Polymorph": "Formats scrolls to fit each platform",
+  "Amplifier": "Triggers engagement response",
+  "Archivist": "Stores daily backups to Arweave"
+}

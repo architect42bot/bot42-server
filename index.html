@@ -1,0 +1,74 @@
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from pathlib import Path
+import time, json
+
+APP_ROOT = Path(__file__).parent
+DATA_DIR = APP_ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
+MEMORY_LOG = DATA_DIR / "memory.log"
+REFLECTION_JSON = DATA_DIR / "reflection_log.json"
+
+app = FastAPI(title="42 Reborn", version="0.3.0")
+app.mount("/static", StaticFiles(directory=str(APP_ROOT)), name="static")
+
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+def log_message(role: str, content: str) -> None:
+    with MEMORY_LOG.open("a", encoding="utf-8") as f:
+        f.write(f"[{_ts()}] {role}: {content}\n")
+
+def reflect_recent(n: int = 12) -> dict:
+    if not MEMORY_LOG.exists():
+        out = {"summary": "No context yet.", "insight": "Start with one small action."}
+        REFLECTION_JSON.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        return out
+    lines = MEMORY_LOG.read_text(encoding="utf-8").splitlines()[-n:]
+    summary = " | ".join((line.split(":", 1)[-1].strip()) for line in lines)[:500]
+    out = {"summary": summary, "insight": "Focus on one concrete, time-boxed next step."}
+    REFLECTION_JSON.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return out
+
+@app.get("/")
+def serve_index():
+    index = APP_ROOT / "index.html"
+    if index.exists():
+        return FileResponse(index)
+    return PlainTextResponse("index.html not found in project root.", status_code=200)
+
+class AskIn(BaseModel):
+    message: str
+
+@app.get("/oracle", response_class=PlainTextResponse)
+def oracle_get():
+    r = reflect_recent(8)
+    reply = f"42 online. Context: {r['summary']} | Insight: {r['insight']}"
+    log_message("bot", reply)
+    return reply
+
+@app.post("/oracle", response_class=PlainTextResponse)
+def oracle_post(payload: AskIn):
+    user_text = payload.message.strip()
+    log_message("user", user_text)
+    base = ("Answer: take one measurable step within the next 10 minutes."
+            if user_text.endswith("?")
+            else "Noted. Queue one next action and pick a time window.")
+    reply = f"{base}\n—42"
+    log_message("bot", reply)
+    return reply
+
+@app.get("/reflect")
+def reflect():
+    return JSONResponse(reflect_recent(12))
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "mode": "chromebook+replit",
+        "memory_log": str(MEMORY_LOG),
+        "has_index_html": (APP_ROOT / "index.html").exists(),
+    }

@@ -1,0 +1,264 @@
+{
+  "3cf4e633-9d0e-46a1-805c-d6a4ddde4a48": {
+    "id": "3cf4e633-9d0e-46a1-805c-d6a4ddde4a48",
+    "text": "goal: summarize: what can 42 do right now?",
+    "tokens": [
+      "goal",
+      "summarize",
+      "what",
+      "can",
+      "42",
+      "do",
+      "right",
+      "now"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757005954.8225036,
+    "last_access": 1757006687.7931685,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "ecce2ca9-ea9a-4637-8931-c5fb2f7d22f4": {
+    "id": "ecce2ca9-ea9a-4637-8931-c5fb2f7d22f4",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757005973.6201434,
+    "last_access": 1757006895.6985402,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "92300909-a545-4d19-af40-b17b33fa3292": {
+    "id": "92300909-a545-4d19-af40-b17b33fa3292",
+    "text": "goal: test offense module",
+    "tokens": [
+      "goal",
+      "test",
+      "offense",
+      "module"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757006366.412016,
+    "last_access": 1757011417.8557038,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "bbaa88a1-99e1-416b-a5d8-fad363c7d596": {
+    "id": "bbaa88a1-99e1-416b-a5d8-fad363c7d596",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757006377.331689,
+    "last_access": 1757006687.7931685,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "e081abd1-8ec3-42c8-bd99-e0505cf65ecd": {
+    "id": "e081abd1-8ec3-42c8-bd99-e0505cf65ecd",
+    "text": "goal: test offense module",
+    "tokens": [
+      "goal",
+      "test",
+      "offense",
+      "module"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757006687.7922647,
+    "last_access": 1757011417.8557038,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "686b0896-be61-4ca6-ab8b-c7fe5b81ee4d": {
+    "id": "686b0896-be61-4ca6-ab8b-c7fe5b81ee4d",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757006694.3204262,
+    "last_access": 1757006895.6985402,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "66c0423e-d9c5-40cd-833e-cfe19e082384": {
+    "id": "66c0423e-d9c5-40cd-833e-cfe19e082384",
+    "text": "goal: test offense module",
+    "tokens": [
+      "goal",
+      "test",
+      "offense",
+      "module"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757006895.6975667,
+    "last_access": 1757011417.8557038,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "696355e3-edae-4184-82f5-bb12f80eed9a": {
+    "id": "696355e3-edae-4184-82f5-bb12f80eed9a",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757006897.6185927,
+    "last_access": 1757006971.3071806,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "cf3dca58-4fdf-4473-93c9-1d6f0c17b3c7": {
+    "id": "cf3dca58-4fdf-4473-93c9-1d6f0c17b3c7",
+    "text": "goal: test offense module",
+    "tokens": [
+      "goal",
+      "test",
+      "offense",
+      "module"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757006971.303547,
+    "last_access": 1757011417.8557038,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "99073863-bf09-4ff8-847e-3639f4fe573c": {
+    "id": "99073863-bf09-4ff8-847e-3639f4fe573c",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757006976.369527,
+    "last_access": 1757006976.369527,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "188e4211-e0d3-4ffa-a719-e91cee417738": {
+    "id": "188e4211-e0d3-4ffa-a719-e91cee417738",
+    "text": "goal: test offense module",
+    "tokens": [
+      "goal",
+      "test",
+      "offense",
+      "module"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757007454.7672813,
+    "last_access": 1757007454.7685812,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "8c7cd5c3-072a-4dbe-b704-33522261e12c": {
+    "id": "8c7cd5c3-072a-4dbe-b704-33522261e12c",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757007456.476667,
+    "last_access": 1757007456.476667,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "d6454f8d-5672-4ae7-9b5f-f175fd2ed430": {
+    "id": "d6454f8d-5672-4ae7-9b5f-f175fd2ed430",
+    "text": "goal: memory: stats",
+    "tokens": [
+      "goal",
+      "memory",
+      "stats"
+    ],
+    "tags": [
+      "done",
+      "goal"
+    ],
+    "importance": 0.7,
+    "created_at": 1757011417.8545346,
+    "last_access": 1757011417.8557038,
+    "ttl_seconds": null,
+    "meta": {}
+  },
+  "19732a24-67e9-4eaf-88de-a1e2e240d2d4": {
+    "id": "19732a24-67e9-4eaf-88de-a1e2e240d2d4",
+    "text": "exec offense -> None",
+    "tokens": [
+      "exec",
+      "offense",
+      "none"
+    ],
+    "tags": [
+      "exec",
+      "offense"
+    ],
+    "importance": 0.6,
+    "created_at": 1757011419.7143068,
+    "last_access": 1757011419.7143068,
+    "ttl_seconds": null,
+    "meta": {}
+  }
+}

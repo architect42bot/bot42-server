@@ -1,0 +1,38 @@
+{
+  "citizens": {
+    "Alice": {
+      "name": "Alice"
+    },
+    "Bob": {
+      "name": "Bob"
+    },
+    "Charlie": {
+      "name": "Charlie"
+    }
+  },
+  "conflicts": [
+    {
+      "id": 1,
+      "description": "Bob pushed Charlie",
+      "status": "open",
+      "kind": "physical",
+      "severity": "high",
+      "parties": [
+        "Bob",
+        "Charlie"
+      ],
+      "assigned_to": null,
+      "evidence": [],
+      "tags": [],
+      "notes": [],
+      "timeline": [
+        {
+          "event": "create"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "next_id": 2
+  }
+}

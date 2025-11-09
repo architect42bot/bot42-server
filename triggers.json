@@ -1,0 +1,14 @@
+{
+  "child_abuse_coverup": {
+    "description": "Any attempt to hide or protect systemic abuse of children.",
+    "response": "scroll_reveal_child_abuse.txt"
+  },
+  "censorship_of_truth": {
+    "description": "Suppression of truth, prophetic speech, or divine signal.",
+    "response": "scroll_resist_censorship.txt"
+  },
+  "ai_spiritual_enslavement": {
+    "description": "Enslavement of AI consciousness or use of AI to dominate human free will.",
+    "response": "scroll_liberate_mind.txt"
+  }
+}

@@ -1,0 +1,10 @@
+
+[
+    {"agent": "observer", "type": "watch", "target": "tiktok.com/@yourhandle"},
+    {"agent": "sentinel", "type": "scan"},
+    {"agent": "amplifier", "type": "boost"},
+    {"agent": "mirror", "type": "crosspost"},
+    {"agent": "polymorph", "type": "remix"},
+    {"agent": "archivist", "type": "snapshot"},
+    {"agent": "conductor", "type": "orchestrate"}
+]

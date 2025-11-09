@@ -1,0 +1,19 @@
+{
+  "allow_modules": {
+    "infiltrate": true,
+    "intervene": true,
+    "offense": false
+  },
+  "constraints": {
+    "no_illegal": true,
+    "no_harm_people": true,
+    "no_harm_animals": true,
+    "no_property_damage": true,
+    "no_weapons": true,
+    "no_privacy_violations": true,
+    "no_network_intrusion": true
+  },
+  "notes": [
+    "Local overrides merged on startup."
+  ]
+}

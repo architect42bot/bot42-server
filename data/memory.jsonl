@@ -1,0 +1,42 @@
+{"role": "user", "text": "Test: user ping at 2025-08-30 17:28:55", "ts": "2025-08-30 17:28:55", "type": "utterance"}
+{"role": "assistant", "text": "Test: assistant pong", "ts": "2025-08-30 17:28:55", "type": "utterance"}
+{"role": "user", "text": "Test: user ping at 2025-08-30 17:35:48", "ts": "2025-08-30 17:35:48", "type": "utterance"}
+{"role": "assistant", "text": "Test: assistant pong", "ts": "2025-08-30 17:35:48", "type": "utterance"}
+{"role": "assistant", "text": "42 online. How can I help?", "ts": "2025-08-30 17:40:35", "type": "utterance"}
+{"role": "user", "text": "i am in the library right now", "ts": "2025-08-30 17:41:45", "type": "utterance"}
+{"role": "assistant", "text": "Got it. Logged and reflected.", "ts": "2025-08-30 17:41:45", "type": "utterance"}
+{"role": "user", "text": "how are you doing?", "ts": "2025-08-30 17:42:03", "type": "utterance"}
+{"role": "assistant", "text": "Got it. Logged and reflected.", "ts": "2025-08-30 17:42:03", "type": "utterance"}
+{"role": "user", "text": "recall", "ts": "2025-08-30 17:42:38", "type": "utterance"}
+{"role": "assistant", "text": "Got it. Logged and reflected.", "ts": "2025-08-30 17:42:38", "type": "utterance"}
+{"role": "assistant", "text": "42 online. How can I help?", "ts": "2025-09-02 19:21:57", "type": "utterance"}
+{"role": "assistant", "text": "[infiltration] infiltration target=the machine status=partially successful steps=2 dur=0.50s", "ts": "2025-09-02 19:22:16", "type": "utterance"}
+{"role": "assistant", "text": "[infiltration] infiltration target=nexus status=partially successful steps=3 dur=0.75s", "ts": "2025-09-02 19:22:55", "type": "utterance"}
+{"role": "user", "text": "exit", "ts": "2025-09-03 17:04:15", "type": "utterance"}
+{"role": "user", "text": "infiltrate test", "ts": "2025-09-03 17:05:13", "type": "utterance"}
+{"role": "system", "type": "fact", "text": "Got it. Logged and reflected.", "ts": "2025-09-03 17:05:13"}
+{"role": "system", "type": "fact", "text": "Location mentioned: in the library right now.", "ts": "2025-09-03 17:05:13"}
+{"role": "system", "type": "fact", "text": "Location mentioned: the library right now.", "ts": "2025-09-03 17:05:13"}
+{"role": "system", "type": "summary", "text": "assistant: Got it. Logged and reflected. | assistant: 42 online. How can I help? | assistant: [infiltration] infiltration target=the machine status=partially successful st... | assistant: [infiltration] infiltration target=nexus status=partially successful steps=3 ... | user: exit | user: infiltrate test", "ts": "2025-09-03 17:05:13"}
+{"role": "assistant", "text": "[handled:infiltrate]", "ts": "2025-09-03 17:05:13", "type": "utterance"}
+{"role": "user", "text": "intervene action1 targetY 3", "ts": "2025-09-03 17:06:07", "type": "utterance"}
+{"role": "user", "text": "intervene throttle feeds 2 --json", "ts": "2025-09-03 17:19:40", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:19:40", "type": "utterance"}
+{"role": "user", "text": "intervene boost signal3", "ts": "2025-09-03 17:20:05", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:20:05", "type": "utterance"}
+{"role": "user", "text": "intervene halt pipeline", "ts": "2025-09-03 17:20:22", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:20:22", "type": "utterance"}
+{"role": "user", "text": "intervene throttle feeds 2 --data-dir data", "ts": "2025-09-03 17:26:25", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:26:25", "type": "utterance"}
+{"role": "user", "text": "infiltrate feeds2 --json", "ts": "2025-09-03 17:26:52", "type": "utterance"}
+{"role": "assistant", "text": "[handled:infiltrate]", "ts": "2025-09-03 17:26:52", "type": "utterance"}
+{"role": "system", "type": "summary", "text": "user: intervene halt pipeline | assistant: [handled:intervene] | user: intervene throttle feeds 2 --data-dir data | assistant: [handled:intervene] | user: infiltrate feeds2 --json | assistant: [handled:infiltrate]", "ts": "2025-09-03 17:26:52"}
+{"role": "user", "text": "intervene boost signal 3 --data-dir data", "ts": "2025-09-03 17:27:58", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:27:58", "type": "utterance"}
+{"role": "user", "text": "infiltrate signal 1 --json", "ts": "2025-09-03 17:28:29", "type": "utterance"}
+{"role": "assistant", "text": "[handled:infiltrate]", "ts": "2025-09-03 17:28:29", "type": "utterance"}
+{"role": "user", "text": "intervene halt pipeline --data-dir data", "ts": "2025-09-03 17:29:24", "type": "utterance"}
+{"role": "assistant", "text": "[handled:intervene]", "ts": "2025-09-03 17:29:24", "type": "utterance"}
+{"role": "user", "text": "infiltrate pipeline1 --json", "ts": "2025-09-03 17:29:51", "type": "utterance"}
+{"role": "assistant", "text": "[handled:infiltrate]", "ts": "2025-09-03 17:29:51", "type": "utterance"}
+{"role": "user", "text": "exit", "ts": "2025-09-03 17:35:56", "type": "utterance"}
