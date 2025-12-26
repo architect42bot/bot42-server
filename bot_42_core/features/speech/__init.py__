@@ -1,0 +1,9 @@
+# bot_42_core/features/speech/__init__.py
+
+from .speech import router, SPEECH_DIR, _collect_speech_entries
+
+__all__ = [
+    "router",
+    "SPEECH_DIR",
+    "_collect_speech_entries",
+]

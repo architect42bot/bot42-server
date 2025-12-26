@@ -1,0 +1,22 @@
+{
+  "policies": [
+    {
+      "name": "Protection Field",
+      "category": "defensive",
+      "type": "guard",
+      "description": "Provides baseline protection against malicious, abusive, or destabilizing input across digital and conversational boundaries.",
+
+      "controls": [
+        "input_validation",
+        "content_sanitization",
+        "context_boundary_enforcement"
+      ],
+
+      "trigger": {
+        "scope": "global",
+        "condition": "on_request",
+        "notes": "Applied to all inbound user input before processing."
+      }
+    }
+  ]
+}

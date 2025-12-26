@@ -1,0 +1,16 @@
+[Unit]
+Description=Bot 42 FastAPI service
+After=network.target
+
+[Service]
+User=bot42
+Group=bot42
+WorkingDirectory=/opt/bot42
+Environment="BOT42_API_KEY=change_me"
+Environment="OPENAI_API_KEY=change_me"
+ExecStart=/opt/bot42/deploy/start_uvicorn.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

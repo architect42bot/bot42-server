@@ -1,18 +1,16 @@
 entrypoint = "main.py"
 language = "python3"
-run = "./.pythonlibs/bin/python main.py"
+
+run = "uvicorn main:app --host 0.0.0.0 --port 8000"
+
 modules = ["nodejs-20", "python-3.11"]
+
+[agent]
+expertMode = true
+
+[nix]
+packages = ["espeak-ng", "file", "libxcrypt", "mailutils"]
 
 [[ports]]
 localPort = 8000
 externalPort = 80
-
-[[ports]]
-localPort = 9000
-externalPort = 9000
-
-[nix]
-packages = ["espeak-ng", "libxcrypt", "psmisc", "wget", "openssh", "nano"]
-
-[agent]
-expertMode = true

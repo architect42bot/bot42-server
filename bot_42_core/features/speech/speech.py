@@ -1,50 +1,89 @@
 # bot_42_core/features/speech/speech.py
 from __future__ import annotations
 
-"""
-Speech utilities and routes for Bot 42.
-
-Provides:
-    GET /speak/logs       → list recorded speech files with metadata
-    GET /speak/play/{id}  → stream or download a single speech file
-"""
-
-# built-ins
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import List, Dict, Tuple, Optional
+import asyncio
+import io
 import mimetypes
+import os
+import re
+import tempfile
+import wave
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# fastapi
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse
 
-# local imports
 from .. import storage_manager
 
-
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # Configuration
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 # Speech log directory (<BASE_DIR>/logs/speech)
 SPEECH_DIR: Path = storage_manager.BASE_DIR / "logs" / "speech"
 SPEECH_DIR.mkdir(parents=True, exist_ok=True)
 
-# Recognized audio formats
+# Recognized formats (primarily for listing / future expansion)
 AUDIO_EXTS: Tuple[str, ...] = (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac")
 
-# Router
+# Default voice/rate (override via env)
+DEFAULT_VOICE: str = (os.getenv("BOT42_TTS_VOICE", "en-GB-LibbyNeural") or "en-GB-LibbyNeural").strip()
+DEFAULT_RATE: str = (os.getenv("BOT42_TTS_RATE", "+0%") or "+0%").strip()
+
+# If edge-tts returns very tiny files, they tend to be silence/invalid
+MIN_WAV_BYTES = 2000
+
 router = APIRouter(prefix="/speak", tags=["speech"])
 
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
 
-# ------------------------------------------------------------------------------
-# Helper functions
-# ------------------------------------------------------------------------------
+_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{3,80}$")
+
+
+def _validate_speech_id(speech_id: str) -> str:
+    speech_id = (speech_id or "").strip()
+    if not speech_id:
+        raise HTTPException(status_code=400, detail="Missing speech id.")
+    if not _ID_RE.match(speech_id):
+        raise HTTPException(status_code=400, detail="Invalid speech id.")
+    if ".." in speech_id or "/" in speech_id or "\\" in speech_id:
+        raise HTTPException(status_code=400, detail="Invalid speech id.")
+    return speech_id
+
+
+def _resolve_wav_path(speech_dir: Path, speech_id: str) -> Path:
+    speech_id = _validate_speech_id(speech_id)
+    p = (speech_dir / f"{speech_id}.wav").resolve()
+    base = speech_dir.resolve()
+    if base not in p.parents:
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Speech file not found.")
+    return p
+
 
 def _iso_utc(ts: float) -> str:
-    """Return a UTC ISO-formatted timestamp."""
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _silence_wav_bytes(duration_s: float = 1.0, sample_rate: int = 16000) -> bytes:
+    """Generate a valid WAV file containing silence."""
+    n_channels = 1
+    sampwidth = 2  # 16-bit PCM
+    n_frames = int(duration_s * sample_rate)
+    silence = b"\x00\x00" * n_frames
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(sample_rate)
+        wf.writeframes(silence)
+    return buf.getvalue()
 
 
 def _collect_speech_entries(
@@ -53,83 +92,194 @@ def _collect_speech_entries(
     include_hidden: bool = False,
 ) -> List[Dict[str, object]]:
     """
-    Scan `root` for audio files (newest first) and return lightweight metadata.
+    Scan root for .wav files (newest first) and return metadata entries.
     """
+    root = root.resolve()
     if not root.exists():
         return []
 
-    files = [
-        p for p in root.rglob("*")
-        if p.is_file()
-        and (include_hidden or not p.name.startswith("."))
-        and p.suffix.lower() in AUDIO_EXTS
-    ]
+    files = []
+    for p in root.glob("*.wav"):
+        name = p.name
+        if (not include_hidden) and name.startswith("."):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        files.append((p, st.st_mtime, st.st_size))
 
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    files.sort(key=lambda x: x[1], reverse=True)
+    out: List[Dict[str, object]] = []
 
-    entries: List[Dict[str, object]] = []
-    for p in files[: max(1, min(limit, 500))]:
-        st = p.stat()
-        created = getattr(st, "st_ctime", st.st_mtime)
-        mime, _ = mimetypes.guess_type(p.name)
-        entries.append(
+    for p, mtime, size in files[: max(1, limit)]:
+        speech_id = p.stem  # "say_2025..." etc.
+        out.append(
             {
-                "id": p.stem,
-                "name": p.name,
-                "path": str(p.resolve()),
-                "mime": mime or "application/octet-stream",
-                "size": int(st.st_size),
-                "created_utc": _iso_utc(created),
-                "modified_utc": _iso_utc(st.st_mtime),
+                "id": speech_id,
+                "file": p.name,
+                "size_bytes": size,
+                "modified_utc": _iso_utc(mtime),
+                "mime": mimetypes.guess_type(p.name)[0] or "audio/wav",
+                "kind": "say" if speech_id.startswith("say_") else "test" if speech_id.startswith("test_") else "speech",
             }
         )
-    return entries
+    return out
 
 
-def _find_by_id(entry_id: str, root: Path = SPEECH_DIR) -> Optional[Path]:
+async def _edge_tts_to_wav_bytes(
+    text: str,
+    voice: str = DEFAULT_VOICE,
+    rate: str = DEFAULT_RATE,
+) -> bytes:
     """
-    Find the newest file whose stem matches `entry_id`.
+    Uses edge-tts to synthesize speech to a WAV file, then returns WAV bytes.
     """
-    candidates = []
-    for ext in AUDIO_EXTS:
-        candidates.extend(root.rglob(f"{entry_id}{ext}"))
+    # Local import so module doesn't hard-crash if dependency missing
+    import edge_tts
 
-    if not candidates:
-        # If caller passed full file name with extension
-        candidates = list(root.rglob(entry_id))
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text'.")
 
-    if not candidates:
-        return None
+    voice = (voice or DEFAULT_VOICE).strip() or DEFAULT_VOICE
+    rate = (rate or DEFAULT_RATE).strip() or DEFAULT_RATE
 
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+        await communicate.save(tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+
+        return data
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
-# ------------------------------------------------------------------------------
+def tts_wav_bytes(text: str, voice: str = DEFAULT_VOICE, rate: str = DEFAULT_RATE) -> bytes:
+    """
+    Sync wrapper for TTS (routes are sync in your project right now).
+    """
+    try:
+        return asyncio.run(_edge_tts_to_wav_bytes(text=text, voice=voice, rate=rate))
+    except RuntimeError:
+        # if an event loop already exists
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_edge_tts_to_wav_bytes(text=text, voice=voice, rate=rate))
+        finally:
+            loop.close()
+
+
+# -------------------------------------------------------------------
 # Routes
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 @router.get("/logs")
-def list_speech_logs(
-    limit: int = Query(50, ge=1, le=500, description="Max number of items to return (newest first)"),
-) -> List[Dict[str, object]]:
-    """Return newest-first audio metadata from SPEECH_DIR."""
-    try:
-        return _collect_speech_entries(SPEECH_DIR, limit=limit)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list speech logs: {e}") from e
+def speak_logs(
+    limit: int = Query(50, ge=1, le=500),
+    include_hidden: bool = Query(False),
+):
+    return {
+        "ok": True,
+        "dir": str(SPEECH_DIR),
+        "default_voice": DEFAULT_VOICE,
+        "default_rate": DEFAULT_RATE,
+        "items": _collect_speech_entries(SPEECH_DIR, limit=limit, include_hidden=include_hidden),
+    }
 
 
-@router.get("/play/{entry_id}")
-def play_speech_by_id(entry_id: str):
-    """Stream a single audio file by its stem (file name without extension)."""
-    target = _find_by_id(entry_id, SPEECH_DIR)
-    if target is None:
-        raise HTTPException(status_code=404, detail=f"No speech entry found for id '{entry_id}'")
+@router.get("/last")
+def speak_last():
+    items = _collect_speech_entries(SPEECH_DIR, limit=1, include_hidden=False)
+    if not items:
+        return {"ok": True, "item": None}
+    return {"ok": True, "item": items[0]}
 
-    mime, _ = mimetypes.guess_type(target.name)
+
+@router.get("/test")
+def speech_test():
+    """
+    Simple speech test - creates a valid silent .wav file in SPEECH_DIR
+    so that /speak/logs and /speak/last have something to show.
+    """
+    SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    file_path = SPEECH_DIR / f"test_{ts}.wav"
+    file_path.write_bytes(_silence_wav_bytes(duration_s=1.0, sample_rate=16000))
+    return {"ok": True, "file": file_path.name, "id": file_path.stem}
+
+
+@router.post("/say")
+def speak_say(payload: dict = Body(...)):
+    """
+    Generate REAL speech via edge-tts, save a wav in SPEECH_DIR, return the filename.
+
+    Body example:
+      { "text": "Hello world", "voice": "en-GB-LibbyNeural", "rate": "+0%" }
+    """
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text'")
+
+    # If caller omits voice/rate, we use defaults (Libby + DEFAULT_RATE)
+    voice = (payload.get("voice") or DEFAULT_VOICE).strip() or DEFAULT_VOICE
+    rate = (payload.get("rate") or DEFAULT_RATE).strip() or DEFAULT_RATE
+
+    SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    file_path = SPEECH_DIR / f"say_{ts}.wav"
+
+    wav_bytes = tts_wav_bytes(text=text, voice=voice, rate=rate)
+
+    # Sanity check: prevents creating "nothing to play" junk
+    if not wav_bytes or len(wav_bytes) < MIN_WAV_BYTES:
+        raise HTTPException(status_code=500, detail="TTS returned empty/too-small audio")
+
+    file_path.write_bytes(wav_bytes)
+
+    return {"ok": True, "file": file_path.name, "id": file_path.stem, "voice": voice, "rate": rate}
+
+
+@router.get("/play/{speech_id}")
+def speak_play(speech_id: str):
+    """
+    Stream/download a speech WAV by id (stem, without .wav).
+    Example: /speak/play/say_20251221T202152
+    """
+    p = _resolve_wav_path(SPEECH_DIR, speech_id)
+
+    # Force correct type
+    media_type = "audio/wav"
+
     return FileResponse(
-        path=str(target.resolve()),
-        media_type=mime or "application/octet-stream",
-        filename=target.name,
+        path=str(p),
+        media_type=media_type,
+        filename=p.name,
     )
+
+def save_tts_wav(text: str, voice: str = DEFAULT_VOICE, rate: str = DEFAULT_RATE) -> str:
+    """
+    Generate a WAV using TTS and save to SPEECH_DIR.
+    Returns speech_id (stem) e.g. 'say_20251221T202152'
+    """
+    SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    speech_id = f"say_{ts}"
+    file_path = SPEECH_DIR / f"{speech_id}.wav"
+
+    wav_bytes = tts_wav_bytes(text=text, voice=voice, rate=rate)
+    if not wav_bytes or len(wav_bytes) < MIN_WAV_BYTES:
+        raise HTTPException(status_code=500, detail="TTS returned empty/too-small audio")
+
+    file_path.write_bytes(wav_bytes)
+    return speech_id

@@ -1,8 +1,9 @@
+click==8.1.7
 fastapi
 uvicorn
 starlette
 requests
 pydantic
-openai
+openai>=1.42.0
 pyttsx3
 features
