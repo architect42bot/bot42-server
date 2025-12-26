@@ -38,9 +38,9 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
-    status,
     Body,
 )
+from fastapi import status as http_status
 from fastapi.responses import (
     JSONResponse,
     HTMLResponse,
@@ -83,6 +83,7 @@ from bot_42_core.core.protection import (
     apply_protection_to_response,
 )
 from bot_42_core.core.protection_infra import (
+    SAFE_KEY,
     protected_dependency,
     ensure_text_length,
 )
@@ -122,6 +123,44 @@ from fastapi.middleware.cors import CORSMiddleware
 # =========================
 from chat_council_endpoint import router as council_router
 from oracle_api import oracle_router
+from service import router as service_router
+
+app = FastAPI(debug=True)
+
+from fastapi.openapi.utils import get_openapi
+
+SAFE_KEY_HEADER_NAME = "SAFE-KEY"
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title="42 :: Core",
+        version=VERSION,
+        description="Protected API",
+        routes=app.routes,
+    )
+
+    openapi_schema.setdefault("components", {})
+    openapi_schema["components"]["securitySchemes"] = {
+        "SAFE_KEY": {
+            "type": "apiKey",
+            "in": "header",
+            "name": SAFE_KEY_HEADER_NAME,
+        }
+    }
+
+    for path in openapi_schema["paths"].values():
+        for method in path.values():
+            method.setdefault("security", []).append({"SAFE_KEY": []})
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+app.include_router(service_router)
 # --- Simple in-memory conversation logs for Dev Chat ---
 # conversation_id -> list of (user_text, bot_reply)
 ConversationTurn = Tuple[str, str]
@@ -224,21 +263,8 @@ ETHICS = Ethics()  # load YAML once
 # NOTE: Swagger/OpenAPI customization MUST come after `app = FastAPI()`
 # or `app` will not exist at import time.
 
-app = FastAPI()
+
 #app.include_router(council_router)
-wire_openapi(app)
-API_KEY = os.getenv("BOT42_API_KEY", "").strip()
-
-def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
-    # If no API key is configured, allow all (dev-safe)
-    if not API_KEY:
-        return
-
-    if not x_api_key or x_api_key.strip() != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
-        )
 
 RATE_LIMIT_MAX = int(os.getenv("BOT42_RATE_MAX", "60"))        # requests
 RATE_LIMIT_WINDOW = int(os.getenv("BOT42_RATE_WINDOW", "60"))  # seconds
@@ -289,9 +315,7 @@ request_log = defaultdict(list)
 
 
 
-# --- API Protection + Guard Middleware ---
-
-SAFE_KEY = os.getenv("SAFE_KEY")
+# --- API Protection + Guard Middleware --
 
 # Configuration
 RATE_LIMIT_WINDOW_SECONDS = 60      # 1-minute window
@@ -760,61 +784,6 @@ async def chat_test_endpoint():
     
       
 # ----- Voice Endpoints (API-key protected) -----
-
-@app.get("/voice/last")
-def voice_last(api_key = Depends(require_api_key)):
-    entries = _collect_speech_entries(SPEECH_DIR, limit=1)
-    if not entries:
-        raise HTTPException(
-            status_code=404,
-            detail="No speech entries available."
-        )
-    return entries[0]
-
-
-@app.get("/voice/last/play")
-def voice_last_play(api_key = Depends(require_api_key)):
-    """
-    Redirect to playback for the most recent voice entry.
-    """
-    entries = _collect_speech_entries(SPEECH_DIR, limit=1)
-    if not entries:
-        raise HTTPException(
-            status_code=404,
-            detail="No speech entries available."
-        )
-
-    entry_id = entries[0]["id"]
-    return RedirectResponse(url=f"/speak/play/{entry_id}")
-
-
-@app.get("/voice/recent")
-def voice_recent(limit: int = 10, api_key = Depends(require_api_key)):
-    """
-    List the most recent N voice entries.
-    """
-    limit = max(1, min(limit, 100))
-    entries = _collect_speech_entries(SPEECH_DIR, limit=limit)
-    return entries
-
-
-@app.get("/voice/find")
-def voice_find(q: str, limit: int = 20, api_key = Depends(require_api_key)):
-    """
-    Search for voice entries by label or filename.
-    """
-    limit = max(1, min(limit, 100))
-    entries = _collect_speech_entries(SPEECH_DIR, limit=limit)
-
-    q = q.lower()
-    results = [
-        e for e in entries
-        if q in e.get("label", "").lower()
-        or q in e.get("name", "").lower()
-        or q in e.get("id", "").lower()
-    ]
-
-    return results
 
 @app.get("/chat/test")
 async def chat_test():
@@ -1526,32 +1495,6 @@ def voice_player():
     </html>
     """
     return HTMLResponse(html)
-
-
-
-
-@app.get("/voice/last")
-def last_voice():
-    """
-    Return metadata for the most recent voice file.
-    """
-    if not os.path.exists(VOICE_MP3):
-        return JSONResponse({
-            "ok": False,
-            "message": "No voice file yet."
-        },
-                            status_code=404)
-
-    file_info = {
-        "ok": True,
-        "filename": os.path.basename(VOICE_MP3),
-        "url":
-        f"/speak/play/{os.path.splitext(os.path.basename(VOICE_MP3))[0]}",
-        "size_bytes": os.path.getsize(VOICE_MP3),
-        "modified":
-        datetime.fromtimestamp(os.path.getmtime(VOICE_MP3)).isoformat()
-    }
-    return JSONResponse(file_info)
 
 
 # ---------------- Speech Integration ----------------

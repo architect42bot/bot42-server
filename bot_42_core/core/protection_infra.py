@@ -1,43 +1,38 @@
 from typing import Optional
 import os
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Header, HTTPException, Request, Security
+from fastapi import status as http_status
+from fastapi.security import APIKeyHeader
 
-# -------------------------------------------------------------------
+# --------------------------------------------------------------------
 # Shared SAFE_KEY config
-# -------------------------------------------------------------------
+# --------------------------------------------------------------------
 
-SAFE_KEY = os.getenv("SAFE_KEY")
+SAFE_KEY = (os.getenv("SAFE_KEY") or "").strip()
 
-
-# -------------------------------------------------------------------
-# API key guard (header: SAFE-KEY)
-# -------------------------------------------------------------------
+# Swagger/OpenAPI-friendly API key scheme (shows Authorize button)
+safe_key_header = APIKeyHeader(name="SAFE-KEY", auto_error=False)
 
 async def enforce_safe_api_key(
-    safe_key: Optional[str] = Header(default=None, alias="SAFE-KEY"),
+    api_key: Optional[str] = Security(safe_key_header),
 ) -> None:
     """
     Unified API-key guard for protected endpoints.
 
     - Reads SAFE_KEY from the environment.
-    - Expects clients to send:  SAFE-KEY: <SAFE_KEY>  in headers.
+    - Expects clients to send: SAFE-KEY: <SAFE_KEY>
     """
 
-    if SAFE_KEY is None:
-        # Server misconfiguration – key not set
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="SAFE_KEY not configured on server",
-        )
+    # If you want "no key configured" to mean "allow all" (dev-safe), keep this:
+    if not SAFE_KEY:
+        return
 
-    if not safe_key or safe_key != SAFE_KEY:
-        # Missing or wrong key
+    if not api_key or api_key.strip() != SAFE_KEY:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key.",
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
         )
-
 
 # -------------------------------------------------------------------
 # Request size guard
