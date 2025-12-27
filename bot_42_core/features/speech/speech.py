@@ -218,7 +218,8 @@ def speech_test():
     file_path.write_bytes(_silence_wav_bytes(duration_s=1.0, sample_rate=16000))
     return {"ok": True, "file": file_path.name, "id": file_path.stem}
 
-
+# Canonical speech synthesis endpoints live under /speak/*
+# /voice/* is reserved for health, readiness, and system metadata
 @router.post("/say")
 def speak_say(payload: dict = Body(...)):
     """

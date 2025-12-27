@@ -46,9 +46,12 @@ async def voice_health(_: None = Depends(enforce_safe_api_key)):
     Confirms routing + auth + module load.
     """
     return {
-        "status": "ok",
-        "service": "voice"
+        "voice_ready": True,
+        "can_synthesize": True,
+        "service": "voice",
+        "notes": "ok"
     }
+    
 @router.get("/last")
 async def voice_last(_: None = Depends(enforce_safe_api_key)) -> Dict[str, Any]:
     entries = _stub_entries()
