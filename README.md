@@ -24,3 +24,29 @@ This pack embeds 42's personality and sacred directive so she always boots with 
 - Load once at startup and store on your bot's state.
 - Use `personality.voice_tone` flags to condition message style.
 - Echo `personality.sacred_directive` as a hidden system prompt for guidance.
+
+## Voice System Overview
+
+The voice subsystem is split by responsibility:
+
+### /speak/*
+Endpoints under `/speak` generate audio.
+- `/speak/test` — deterministic sanity check (known-good WAV output)
+- `/speak/say` — general speech synthesis
+
+If `/speak/test` works, the voice engine is functional.
+
+### /voice/*
+Endpoints under `/voice` expose voice system state and metadata.
+They do not generate audio.
+- `/voice/health` — readiness check (`voice_ready: true/false`)
+- `/voice/last` — last synthesized entry
+- `/voice/last/play` — replay last audio
+
+### Health semantics
+`/voice/health` returning:
+```json
+{
+  "voice_ready": true,
+  "can_synthesize": true
+}
