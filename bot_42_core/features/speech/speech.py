@@ -35,6 +35,8 @@ DEFAULT_RATE: str = (os.getenv("BOT42_TTS_RATE", "+0%") or "+0%").strip()
 # If edge-tts returns very tiny files, they tend to be silence/invalid
 MIN_WAV_BYTES = 2000
 
+# Canonical speech synthesis endpoints live under /speak/*
+# /voice/* is reserved for health/readiness and voice metadata (no synthesis)
 router = APIRouter(prefix="/speak", tags=["speech"])
 
 # -------------------------------------------------------------------
