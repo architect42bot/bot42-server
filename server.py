@@ -8,7 +8,7 @@ app = FastAPI()
 def root():
     return {"status": "42 online", "message": "Hello from Bot 42"}
 
-@app.post("/chat")
+@app.post("/server/chat")
 def chat(message: str):
     # log user
     log_user(message)

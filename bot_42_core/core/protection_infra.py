@@ -1,104 +1,141 @@
-from typing import Optional
+"""
+bot_42_core/core/protection_infra.py
+
+Central request protection utilities:
+- SAFE-KEY header enforcement
+- Body size caps (prevents giant payload abuse)
+- Text length caps (prevents runaway prompts)
+
+This is designed to be used as FastAPI dependencies, e.g.:
+
+from bot_42_core.core.protection_infra import protected_dependency
+
+@app.post("/protected/chat", dependencies=[Depends(protected_dependency)])
+async def chat(...):
+    ...
+
+or:
+
+async def chat(dep: None = Depends(protected_dependency)):
+    ...
+"""
+
+from __future__ import annotations
+
 import os
+from typing import Optional
 
-from fastapi import Header, HTTPException, Request, Security
-from fastapi import status as http_status
-from fastapi.security import APIKeyHeader
+from fastapi import Header, HTTPException, Request, status
 
-# --------------------------------------------------------------------
-# Shared SAFE_KEY config
-# --------------------------------------------------------------------
 
-SAFE_KEY = (os.getenv("SAFE_KEY") or "").strip()
+# -------------------------
+# Config helpers
+# -------------------------
 
-# Swagger/OpenAPI-friendly API key scheme (shows Authorize button)
-safe_key_header = APIKeyHeader(name="SAFE-KEY", auto_error=False)
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
-async def enforce_safe_api_key(
-    api_key: Optional[str] = Security(safe_key_header),
-) -> None:
+
+def _expected_safe_key() -> Optional[str]:
     """
-    Unified API-key guard for protected endpoints.
+    Where we read the expected key from.
 
-    - Reads SAFE_KEY from the environment.
-    - Expects clients to send: SAFE-KEY: <SAFE_KEY>
+    Use whichever you prefer; both are supported:
+      - BOT42_SAFE_KEY (preferred)
+      - SAFE_KEY (fallback)
     """
+    return os.getenv("BOT42_SAFE_KEY") or os.getenv("SAFE_KEY")
 
-    # If you want "no key configured" to mean "allow all" (dev-safe), keep this:
-    if not SAFE_KEY:
-        return
 
-    if not api_key or api_key.strip() != SAFE_KEY:
+# Defaults are conservative + practical for your use case
+DEFAULT_MAX_BODY_BYTES = _env_int("BOT42_MAX_BODY_BYTES", 256_000)      # ~256KB
+DEFAULT_MAX_TEXT_CHARS = _env_int("BOT42_MAX_TEXT_CHARS", 8_000)        # prompt-size cap
+
+
+# -------------------------
+# SAFE-KEY enforcement
+# -------------------------
+
+async def enforce_safe_api_key(safe_key: Optional[str] = None) -> None:
+    """
+    Enforce SAFE-KEY presence and validity.
+
+    FastAPI will inject the header value into `safe_key` (via Header(alias="SAFE-KEY"))
+    when used in a dependency function.
+    """
+    expected = _expected_safe_key()
+
+    # If you haven't configured an expected key, we treat that as misconfiguration
+    # and fail closed for protected endpoints.
+    if not expected:
         raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server SAFE-KEY is not configured (set BOT42_SAFE_KEY).",
         )
 
-# -------------------------------------------------------------------
-# Request size guard
-# -------------------------------------------------------------------
+    if not safe_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing SAFE-KEY header",
+        )
 
-async def check_body_size(
-    request: Request,
-    max_bytes: int = 32_000,
-) -> None:
+    if safe_key != expected:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid SAFE-KEY",
+        )
+
+
+# -------------------------
+# Body size protection
+# -------------------------
+
+async def check_body_size(request: Request, max_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
     """
-    Lightweight body-size guard based on the Content-Length header.
+    Enforce maximum request body size.
+
+    NOTE: calling request.body() reads and caches the body, so downstream handlers
+    can still access it without re-reading the stream.
     """
-    content_length = request.headers.get("content-length")
-
-    # If client didn't send Content-Length, just skip this check.
-    if content_length is None:
-        return
-
     try:
-        size = int(content_length)
-    except ValueError:
+        body = await request.body()
+    except Exception:
+        # If body can't be read, treat as bad request
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Content-Length header",
+            detail="Unable to read request body",
         )
 
-    if size > max_bytes:
+    if body is None:
+        return
+
+    if len(body) > max_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Request body too large. Max allowed is {max_bytes} bytes.",
         )
 
 
-# -------------------------------------------------------------------
-# Text-length guard for JSON chat-style payloads
-# -------------------------------------------------------------------
+# -------------------------
+# Text-length protection
+# -------------------------
 
-async def ensure_text_length(
-    request: Request,
-    max_chars: int = 16_000,
-) -> None:
+def enforce_text_length(text: str, max_chars: int = DEFAULT_MAX_TEXT_CHARS) -> None:
     """
-    Guard to keep text inputs from being absurdly large.
-
-    Assumes JSON body with one of:
-      - "input"
-      - "text"
-      - "message"
+    Enforce maximum characters for a text field you plan to send to an LLM/TTS/etc.
+    Call this inside endpoints where you accept user 'message', 'text', etc.
     """
-    if request.method not in {"POST", "PUT", "PATCH"}:
-        return
-
-    try:
-        body = await request.json()
-    except Exception:
-        # If it's not JSON, just skip – other layers will complain if needed.
-        return
-
-    text = (
-        (body.get("input") or body.get("text") or body.get("message") or "")
-        if isinstance(body, dict)
-        else ""
-    )
-
     if not isinstance(text, str):
-        return
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Text must be a string",
+        )
 
     if len(text) > max_chars:
         raise HTTPException(
@@ -107,19 +144,28 @@ async def ensure_text_length(
         )
 
 
-# -------------------------------------------------------------------
-# Combined dependency used by main.py
-# -------------------------------------------------------------------
+# -------------------------
+# Composite dependency (what you use on routes)
+# -------------------------
 
 async def protected_dependency(
     request: Request,
     safe_key: Optional[str] = Header(default=None, alias="SAFE-KEY"),
 ) -> None:
     """
-    Composite dependency for sensitive endpoints.
+    Composite dependency for protected routes.
 
-    - Verifies SAFE-KEY header.
-    - Checks overall request body size.
+    - Verifies SAFE-KEY header
+    - Enforces request body size limits
     """
-    await enforce_safe_api_key(safe_key=safe_key)
+
+    raw = (
+        safe_key
+        or request.headers.get("SAFE-KEY")
+        or request.headers.get("safe-key")
+        or request.headers.get("X-SAFE-KEY")
+        or request.headers.get("x-safe-key")
+    )
+
+    await enforce_safe_api_key(raw)
     await check_body_size(request)

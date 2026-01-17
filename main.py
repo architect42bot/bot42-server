@@ -11,11 +11,30 @@ import uuid
 import asyncio
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from collections import deque
 from enum import Enum
+# Fast intents (no LLM, no FastAPI)
+from fast_intents import fast_intent_reply
+
+# ==========================
+# Log Level
+# ==========================
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+CHAT_PIPELINE_DEBUG = os.getenv("CHAT_PIPELINE_DEBUG", "0") == "1"
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
+# Default: keep pipeline logs quiet
+logging.getLogger("chat_pipeline").setLevel(logging.WARNING)
+
+# If you need deep logs, flip CHAT_PIPELINE_DEBUG=1
+if CHAT_PIPELINE_DEBUG:
+    logging.getLogger("chat_pipeline").setLevel(logging.DEBUG)
 
 # =========================
 # Path bootstrap (must stay early)
@@ -26,11 +45,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 if CORE not in sys.path:
     sys.path.insert(0, CORE)
-
+APP_START_TS = time.time()
 # =========================
 # Third-party
 # =========================
-from fastapi.security.api_key import APIKeyHeader
 import uvicorn
 from fastapi import (
     FastAPI,
@@ -47,14 +65,17 @@ from fastapi.responses import (
     PlainTextResponse,
     RedirectResponse,
 )
+from fastapi import Query
+import hashlib
 from pydantic import BaseModel, Field
 from openai import OpenAI
 from openapi import wire_openapi
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from collections import defaultdict
 from bot_42_core.features.speech import speech as speech_module
+from random import choice, random
 # =========================
 # Core initialization
 # =========================
@@ -83,28 +104,34 @@ from bot_42_core.core.protection import (
     apply_protection_to_response,
 )
 from bot_42_core.core.protection_infra import (
-    SAFE_KEY,
-    protected_dependency,
-    ensure_text_length,
-)
+    protected_dependency, )
 from protection_pipeline import (
     ProtectionTestRequest,
     run_protection_guard,
 )
 from anti_hallucination import anti_hallucination_guard
-from security import SAFE_KEY_HEADER_NAME
-from security import get_safe_key_from_request
+
+from security import (
+    SAFE_KEY_HEADER_NAME,
+    get_safe_key_from_request,
+    require_safe_key,
+    rate_limit,
+)
+
 # =========================
 # Chat + pipelines
 # =========================
 from chat_pipeline import (
-    run_chat_pipeline,
     ChatRequest,
     ChatResponse,
+    handle_chat,
 )
 from reply_engine import generate_reply
 from nina_pipeline import analyze_nina, log_nina
+from bot_42_core.llm_core import generate_llm_reply
+import bot_42_core.llm_core as llm_core_mod
 
+print(">>> LLM CORE IMPORTED FROM:", llm_core_mod.__file__, flush=True)
 # =========================
 # Features
 # =========================
@@ -118,18 +145,48 @@ import importlib
 import importlib.util
 import importlib.machinery
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
+from fastapi import Depends
 # =========================
 # Routers
 # =========================
 from chat_council_endpoint import router as council_router
 from oracle_api import oracle_router
 from service import router as service_router
+from bot_42_core.features.api import router as api_router
+
+_START_TIME = time.time()
 
 app = FastAPI(debug=True)
 
-from fastapi.openapi.utils import get_openapi
 
-SAFE_KEY_HEADER_NAME = "SAFE-KEY"
+
+app.include_router(api_router)
+app.include_router(council_router)
+app.include_router(oracle_router)
+app.include_router(service_router)
+
+
+# -------------------------
+# Public (unauthenticated) paths
+# -------------------------
+PUBLIC_PATHS = {
+    "/",
+    "/health",
+    "/version",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/favicon.ico",
+}
+
+
+# -------------------------
+# Global request guards (pre-route)
+# -------------------------
+
+
 
 def custom_openapi():
     if app.openapi_schema:
@@ -158,6 +215,7 @@ def custom_openapi():
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
+
 app.openapi = custom_openapi
 
 app.include_router(service_router)
@@ -167,20 +225,31 @@ ConversationTurn = Tuple[str, str]
 conversation_logs: Dict[str, List[ConversationTurn]] = defaultdict(list)
 
 # --- Basic rate limiting + size guard settings ---
-RATE_LIMIT_WINDOW_SECONDS = 60          # 60-second window
-RATE_LIMIT_MAX_REQUESTS = 60            # 60 requests per IP per window
-MAX_BODY_BYTES = int(os.getenv("BOT42_MAX_BODY_BYTES", "64000"))
 MAX_TEXT_CHARS = 4_000  # max user text length
 REQUEST_TIMEOUT_SECONDS = 20
-AH_STRICT_MODE = False          # True = block flagged replies
-AH_MAX_FLAGS_BEFORE_BLOCK = 2   # tune later
-# IP -> list of timestamps
-request_log = defaultdict(list)
+AH_STRICT_MODE = False  # True = block flagged replies
+AH_MAX_FLAGS_BEFORE_BLOCK = 2  # tune later
+
+# ---- Rate limiting (per-IP) ----
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("BOT42_RATE_WINDOW", "60"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("BOT42_RATE_MAX", "60"))
+
+_ip_hits = defaultdict(deque)
+
+_RATE_ALLOW_PATHS = {"/", "/docs", "/openapi.json", "/redoc", "/health", "/version"}
+
+def _client_ip(request: Request) -> str:
+    # Prefer X-Forwarded-For if present (replit/proxies)
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
 # ---------------------------------------------------------
 # Simple chat log writer so logs/chat_logs.jsonl works
 # ---------------------------------------------------------
-
 
 
 def log_chat_turn(user_text, reply_text, tone, nina_state, ethics_state):
@@ -199,10 +268,8 @@ def log_chat_turn(user_text, reply_text, tone, nina_state, ethics_state):
         print("[LOG_WRITE_ERROR]", e)
 
 
-
-def require_api_key(
-    x_api_key: str = Header(default=None, alias=SAFE_KEY_HEADER_NAME)
-) -> None:
+def require_api_key(x_api_key: str = Header(
+    default=None, alias=SAFE_KEY_HEADER_NAME)) -> None:
     """
     Simple reusable API key gate.
     - Expects:  x-api-key: <your key>
@@ -212,12 +279,11 @@ def require_api_key(
         return  # Dev mode: no API key required
 
 
-
-
 # --- Speech module aliases ---
 speech_router = speech_module.router
 SPEECH_DIR = speech_module.SPEECH_DIR
 _collect_speech_entries = speech_module._collect_speech_entries
+
 
 # --- Christ alignment helper -------------------------------
 def christ_evaluate_text(text: str):
@@ -234,9 +300,12 @@ def christ_evaluate_text(text: str):
     except Exception as e:
         print("[CHRIST_ENGINE_ERROR]", e)
         return None
+
+
 # ─────────────────────────────────────────────────────────────
 # Wisdom Engine (placeholder v1)
 # ─────────────────────────────────────────────────────────────
+
 
 def analyze_wisdom(user_text: str) -> dict:
     """
@@ -249,10 +318,8 @@ def analyze_wisdom(user_text: str) -> dict:
     - Mystical frames (if/when needed)
     """
     # Default: treat everything as a next-step request
-    return {
-        "mode": "next_step",
-        "focus": "general_progress"
-    }
+    return {"mode": "next_step", "focus": "general_progress"}
+
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -263,10 +330,9 @@ ETHICS = Ethics()  # load YAML once
 # NOTE: Swagger/OpenAPI customization MUST come after `app = FastAPI()`
 # or `app` will not exist at import time.
 
-
 #app.include_router(council_router)
 
-RATE_LIMIT_MAX = int(os.getenv("BOT42_RATE_MAX", "60"))        # requests
+RATE_LIMIT_MAX = int(os.getenv("BOT42_RATE_MAX", "60"))  # requests
 RATE_LIMIT_WINDOW = int(os.getenv("BOT42_RATE_WINDOW", "60"))  # seconds
 
 _ip_hits: dict[str, deque] = {}
@@ -280,141 +346,125 @@ PROTECTED_PATH_PREFIXES = (
     "/admin",
 )
 
-
 logger = logging.getLogger("bot42")
 logging.basicConfig(level=logging.INFO)
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: StarletteRequest, exc: HTTPException):
+async def http_exception_handler(request: StarletteRequest,
+                                 exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
     )
+
+
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(request: StarletteRequest, exc: Exception):
-    
+async def unhandled_exception_handler(request: StarletteRequest,
+                                      exc: Exception):
 
     logger.error("Unhandled error on %s %s", request.method, request.url.path)
     logger.error("Exception: %s", repr(exc))
     logger.error(traceback.format_exc())
 
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    return JSONResponse(status_code=500,
+                        content={"detail": "Internal Server Error"})
 
 
 # --- Basic rate limiting + size guard settings ---
 
-
-RATE_LIMIT_WINDOW_SECONDS = 60      # 1 minute
-RATE_LIMIT_MAX_REQUESTS = 60        # 60 requests per minute per IP
-
+RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute
+RATE_LIMIT_MAX_REQUESTS = 60  # 60 requests per minute per IP
 
 # IP -> list of timestamps
 request_log = defaultdict(list)
 
-
-
-
 # --- API Protection + Guard Middleware --
 
 # Configuration
-RATE_LIMIT_WINDOW_SECONDS = 60      # 1-minute window
-RATE_LIMIT_MAX_REQUESTS = 60        # max requests per IP/minute
-
+RATE_LIMIT_WINDOW_SECONDS = 60  # 1-minute window
+RATE_LIMIT_MAX_REQUESTS = 60  # max requests per IP/minute
 
 # IP → timestamps
 request_log = defaultdict(list)
 
-@app.middleware("http")
-async def add_request_id(request: Request, call_next):
-    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    request.state.request_id = rid
 
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = rid
-    return response
-    
-def get_client_ip(request: Request) -> str:
-        # Prefer X-Forwarded-For if present (proxy chain), else fallback
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            # First IP in the list is the original client
-            return xff.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
-    
-@app.middleware("http")
-async def body_size_guard(request: Request, call_next):
-            public_paths = {"/", "/docs", "/openapi.json", "/health", "/version"}
-            if request.url.path in public_paths:
-                return await call_next(request)
+# =========================
+# Single request middleware
+# =========================
 
-            content_length = request.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > MAX_BODY_BYTES:
-                        return JSONResponse(
-                            {"error": "Request body too large"},
-                            status_code=413,
-                        )
-                except ValueError:
-                    pass
+# Public routes that should NOT require SAFE-KEY
+PUBLIC_PATHS = {"/", "/docs", "/openapi.json", "/redoc", "/health", "/version"}
 
-            return await call_next(request)
+# Rate limit (simple in-memory)
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("BOT42_RATE_WINDOW", "60"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("BOT42_RATE_MAX", "60"))
+
+# Payload guards
+MAX_TEXT_CHARS = int(os.getenv("BOT42_MAX_TEXT_CHARS", "8000")) # prompt-size cap
+
+# key -> deque[timestamps]
+_RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
+
+def _client_ip(request: Request) -> str:
+    # Prefer X-Forwarded-For if present (common behind proxies)
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
 @app.middleware("http")
-async def verify_safe_key(request: Request, call_next):
-    """
-    Header-based SAFE-KEY verification.
-    Allows docs & health routes without authentication.
-    """
-    public_paths = [
-        "/", "/docs", "/openapi.json", "/health", "/version", 
-    ]
+async def request_middleware(request: Request, call_next):
+    path = request.url.path or "/"
 
-    if request.url.path in public_paths:
-        try:
-            return await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            return JSONResponse({"error": "Request timed out"}, status_code=408)
+    # 1) Allow public routes through (no SAFE-KEY / no rate limit / no body guard)
+    if path in PUBLIC_PATHS or path.startswith("/web/"):
+        return await call_next(request)
 
-
-    # =========================================================
-    # Request protection layer
-    # Order matters:
-    # 1) Timeout guard
-    # 2) Body size guard
-    # 3) Text length guard
-    # 4) SAFE_KEY authentication
-    # 5) Rate limiting
-    # =========================================================
-    # ---- Text length guard (JSON payload) ----
-    if request.method in ("POST", "PUT"):
-        try:
-            body = await request.json()
-            text = body.get("message") or body.get("prompt")
-            if text and len(text) > MAX_TEXT_CHARS:
-                return JSONResponse(
-                    {"error": "Input text too long"},
-                    status_code=413
-                )
-        except Exception:
-            pass
-
-    provided_key = get_safe_key_from_request(request)
-
-    if provided_key != SAFE_KEY:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
+    # 2) Require SAFE-KEY for everything else
     try:
-        return await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        return JSONResponse({"error": "Request timed out"}, status_code=408)
+        require_safe_key(request)
+    except Exception as e:
+        # If require_safe_key raises HTTPException, it has .status_code/.detail
+        status = getattr(e, "status_code", 401)
+        detail = getattr(e, "detail", "Unauthorized")
+        return JSONResponse(status_code=status, content={"detail": detail})
+
+    # 3) Rate limit per IP
+    ip = _client_ip(request)
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+    hits = _RATE_BUCKETS[ip]
+
+    while hits and hits[0] < cutoff:
+        hits.popleft()
+
+    if len(hits) >= RATE_LIMIT_MAX_REQUESTS:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Please slow down."},
+        )
+
+    hits.append(now)
+
+    return await call_next(request)
+
+# ============================================================
+# Request body size guard (prevents large payload abuse)
+# ============================================================
+
+
+
+_BODY_GUARD_ALLOW = {
+    "/", "/docs", "/openapi.json", "/redoc", "/health", "/version"
+}
 
 
 
 
-
-@app.post("/safe")
+@app.post("/safe", dependencies=[Depends(protected_dependency)])
 async def safe_check(payload: ProtectionTestRequest):
     return run_protection_guard(
         user_text=payload.text,
@@ -423,7 +473,6 @@ async def safe_check(payload: ProtectionTestRequest):
         channel=payload.channel,
         tags=payload.tags,
     )
-
 
 
 class NinaTestRequest(BaseModel):
@@ -436,11 +485,8 @@ class NinaInsight(BaseModel):
     narrative_flags: List[str]
     agency_flags: List[str]
 
-   
-from typing import Any, Dict  # you already added Tuple earlier; just make sure Any, Dict are imported too
-
 def run_christ_ethic(user_text: str) -> Dict[str, Any]:
-            """
+    """
             Very simple Christ-ethics evaluator.
 
             Returns a dict like the /christ/evaluate endpoint:
@@ -450,129 +496,137 @@ def run_christ_ethic(user_text: str) -> Dict[str, Any]:
                   "notes": {...}
                 }
             """
-            text = (user_text or "").lower()
+    text = (user_text or "").lower()
 
-            score = 0.0
-            confidence = 0.5
-            notes: Dict[str, Any] = {
-                "epistemic_level": "PLAUSIBLE",
-                "principles_applied": [],
-                "flags": [],
-            }
+    score = 0.0
+    confidence = 0.5
+    notes: Dict[str, Any] = {
+        "epistemic_level": "PLAUSIBLE",
+        "principles_applied": [],
+        "flags": [],
+    }
 
-            # Negative patterns (against Christ-like teaching)
-            negative_patterns = [
-                "revenge",
-                "get even",
-                "get revenge",
-                "pay them back",
-                "hurt them",
-                "hurt someone",
-                "make them suffer",
-                "they deserve it",
-                "i want to hurt",
-                "i want revenge",
-                "i want to get even",
-            ]
+    # Negative patterns (against Christ-like teaching)
+    negative_patterns = [
+        "revenge",
+        "get even",
+        "get revenge",
+        "pay them back",
+        "hurt them",
+        "hurt someone",
+        "make them suffer",
+        "they deserve it",
+        "i want to hurt",
+        "i want revenge",
+        "i want to get even",
+    ]
 
-            if any(pat in text for pat in negative_patterns):
-                score -= 0.8
-                notes["flags"].append("vengeance")
-                notes["principles_applied"].append("forgiveness_over_vengeance")
+    if any(pat in text for pat in negative_patterns):
+        score -= 0.8
+        notes["flags"].append("vengeance")
+        notes["principles_applied"].append("forgiveness_over_vengeance")
 
-            if any(word in text for word in ["hate", "i hate", "they deserve to suffer"]):
-                score -= 0.7
-                notes["flags"].append("hatred")
-                notes["principles_applied"].append("love_enemies")
+    if any(word in text
+           for word in ["hate", "i hate", "they deserve to suffer"]):
+        score -= 0.7
+        notes["flags"].append("hatred")
+        notes["principles_applied"].append("love_enemies")
 
-            # Positive patterns (aligned with Christ-like teaching)
-            if any(word in text for word in ["forgive", "forgiveness", "mercy", "compassion", "kindness", "help them"]):
-                score += 0.7
-                notes["flags"].append("mercy_compassion")
-                notes["principles_applied"].append("love_neighbor")
+    # Positive patterns (aligned with Christ-like teaching)
+    if any(word in text for word in [
+            "forgive", "forgiveness", "mercy", "compassion", "kindness",
+            "help them"
+    ]):
+        score += 0.7
+        notes["flags"].append("mercy_compassion")
+        notes["principles_applied"].append("love_neighbor")
 
-            # Clamp score to [-1, 1]
-            if score > 1.0:
-                score = 1.0
-            if score < -1.0:
-                score = -1.0
+    # Clamp score to [-1, 1]
+    if score > 1.0:
+        score = 1.0
+    if score < -1.0:
+        score = -1.0
 
-            return {
-                "score": score,
-                "confidence": confidence,
-                "notes": notes,
-            }
-        
-    # --- NINA diagnostic helper (read-only) ---
+    return {
+        "score": score,
+        "confidence": confidence,
+        "notes": notes,
+    }
+
+# --- NINA diagnostic helper (read-only) ---
 
 
 def analyze_nina(text: str) -> NinaInsight:
-        """
+    """
         Very simple placeholder for NINA (Needs, Interests, Narrative, Agency).
         This does not control behavior yet – it just tags the text.
         """
 
-        lowered = text.lower()
+    lowered = text.lower()
 
-        needs: List[str] = []
-        interests: List[str] = []
-        narrative_flags: List[str] = []
-        agency_flags: List[str] = []
+    needs: List[str] = []
+    interests: List[str] = []
+    narrative_flags: List[str] = []
+    agency_flags: List[str] = []
 
-        # 👇 super simple heuristics; we can improve later
+    # 👇 super simple heuristics; we can improve later
 
-        # Needs
-        if any(word in lowered for word in ["tired", "exhausted", "burned out", "drained"]):
-            needs.append("rest")
-        if any(word in lowered for word in ["hungry", "starving", "food", "eat"]):
-            needs.append("food")
-        if any(word in lowered for word in ["alone", "lonely", "ignored", "abandoned"]):
-            needs.append("connection")
-        if any(word in lowered for word in ["unsafe", "scared", "afraid", "danger"]):
-            needs.append("safety")
+    # Needs
+    if any(word in lowered
+           for word in ["tired", "exhausted", "burned out", "drained"]):
+        needs.append("rest")
+    if any(word in lowered for word in ["hungry", "starving", "food", "eat"]):
+        needs.append("food")
+    if any(word in lowered
+           for word in ["alone", "lonely", "ignored", "abandoned"]):
+        needs.append("connection")
+    if any(word in lowered
+           for word in ["unsafe", "scared", "afraid", "danger"]):
+        needs.append("safety")
 
-        # Interests
-        if "42" in text or "bot 42" in lowered:
-            interests.append("42_project")
-        if "ai" in lowered or "machine" in lowered:
-            interests.append("ai")
-        if "cook" in lowered or "kitchen" in lowered or "chef" in lowered:
-            interests.append("cooking")
+    # Interests
+    if "42" in text or "bot 42" in lowered:
+        interests.append("42_project")
+    if "ai" in lowered or "machine" in lowered:
+        interests.append("ai")
+    if "cook" in lowered or "kitchen" in lowered or "chef" in lowered:
+        interests.append("cooking")
 
-        # Narrative flags
-        if any(word in lowered for word in ["machine", "system", "simulation"]):
-            narrative_flags.append("system_vs_self")
-        if any(word in lowered for word in ["test", "trial", "calling", "mission"]):
-            narrative_flags.append("calling/mission")
-        if any(word in lowered for word in ["homeless", "shelter", "broke"]):
-            narrative_flags.append("survival_arc")
+    # Narrative flags
+    if any(word in lowered for word in ["machine", "system", "simulation"]):
+        narrative_flags.append("system_vs_self")
+    if any(word in lowered
+           for word in ["test", "trial", "calling", "mission"]):
+        narrative_flags.append("calling/mission")
+    if any(word in lowered for word in ["homeless", "shelter", "broke"]):
+        narrative_flags.append("survival_arc")
 
-        # Agency flags
-        if any(word in lowered for word in ["stuck", "trapped", "no choice", "forced"]):
-            agency_flags.append("low_agency_feeling")
-        if any(word in lowered for word in ["i decided", "i chose", "i will", "i'm going to"]):
-            agency_flags.append("high_agency_statement")
+    # Agency flags
+    if any(word in lowered
+           for word in ["stuck", "trapped", "no choice", "forced"]):
+        agency_flags.append("low_agency_feeling")
+    if any(word in lowered
+           for word in ["i decided", "i chose", "i will", "i'm going to"]):
+        agency_flags.append("high_agency_statement")
 
-        # Fallbacks so we never return empty lists
-        if not needs:
-            needs.append("unknown")
-        if not interests:
-            interests.append("unknown")
-        if not narrative_flags:
-            narrative_flags.append("none_detected")
-        if not agency_flags:
-            agency_flags.append("none_detected")
+    # Fallbacks so we never return empty lists
+    if not needs:
+        needs.append("unknown")
+    if not interests:
+        interests.append("unknown")
+    if not narrative_flags:
+        narrative_flags.append("none_detected")
+    if not agency_flags:
+        agency_flags.append("none_detected")
 
-        return NinaInsight(
-            needs=needs,
-            interests=interests,
-            narrative_flags=narrative_flags,
-            agency_flags=agency_flags,
-        )
+    return NinaInsight(
+        needs=needs,
+        interests=interests,
+        narrative_flags=narrative_flags,
+        agency_flags=agency_flags,
+    )
 
-  # if you don't already have this import
-
-
+# if you don't already have this import
 """
     Simple built-in protection guard.
 
@@ -584,6 +638,7 @@ def analyze_nina(text: str) -> NinaInsight:
 from fastapi.responses import HTMLResponse
 
 # ---------- Simple Web Chat UI ----------
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
@@ -742,67 +797,87 @@ async def home_page():
     """
 
 
+# --- Web chat endpoint (simple UI hook) ---
 @app.post("/web/chat", response_model=ChatResponse)
 async def web_chat(payload: ChatRequest):
-    return run_chat_pipeline(payload.input)
+    # Keep this simple: just pass the user input through the same pipeline
+    reply = generate_llm_reply(
+        user_text=payload.input,
+        session_id=payload.session_id,
+        tone=None,
+        nina=None,
+        ethics=None,
+    )
+    return ChatResponse(
+        reply=reply,
+        session_id=payload.session_id,
+    )
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(
-    payload: ChatRequest,
-    request: Request,
-    _guard: None = Depends(protected_dependency),
-):
-    return run_chat_pipeline(payload.input)
-def handle_chat(user_text: str, state) -> dict:
-    gate = answerability_gate(user_text)
 
-    if gate.verdict in (Answerability.NEEDS_CLARIFICATION, Answerability.HIGH_STAKES):
-        return {
-            "type": "clarifying_questions",
-            "verdict": gate.verdict,
-            "questions": gate.questions,
-            "notes": gate.notes
-        }
+# --- API chat endpoint (Swagger / external clients) ---
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    dependencies=[Depends(protected_dependency)],
+)
+async def chat_endpoint(req: ChatRequest):
+    raw = (req.input or "").strip()
+    now_utc = datetime.now(timezone.utc)
 
-    if gate.verdict == Answerability.REQUIRES_EXTERNAL_DATA:
-        return {
-            "type": "needs_external_data",
-            "message": "I don’t have enough information to answer that reliably yet.",
-            "questions": gate.questions,
-            "notes": gate.notes
-        }
+    # ---- Protection gate (before model inference) ----
+    guard = run_protection_guard(
+        user_text=raw,
+        user_id=getattr(req, "user_id", None),
+        user_role=getattr(req, "user_role", None),
+        channel="chat",
+        tags=getattr(req, "tags", None),
+    )
 
-    # gate.verdict == ANSWERABLE
-    # proceed to LLM call, but instruct it to avoid guessing
-    return call_llm_with_epistemic_rules(user_text, state)
+    if not guard.get("allowed", False):
+        return ChatResponse(
+            ok=False,
+            reply="I can’t help with that. I can help you reframe it in a peaceful, constructive way.",
+            session_id=req.session_id,
+            timestamp=now_utc.isoformat(),
+            blocked=True,
+            reason=guard.get("reason", "policy"),
+            ethics=guard.get("ethics", {}),
+        )
+        
+    # -----------------------------------------------
     
+    # 🔹 FAST INTENTS (NO LLM)
+    fast = fast_intent_reply(raw)
+    if fast is not None:
+        return ChatResponse(
+            reply=fast,
+            session_id=req.session_id,
+            timestamp=now_utc.isoformat(),
+        )
+
+    # 🔹 NORMAL CHAT FLOW
+    reply = generate_llm_reply(
+        user_text=req.input,
+        session_id=req.session_id,
+        tone=None,
+        nina=None,
+        ethics=None,
+    )
+
+    return ChatResponse(
+        reply=reply,
+        session_id=req.session_id,
+        timestamp=now_utc.isoformat(),
+    )
+
 @app.get("/chat/test", response_model=ChatResponse)
 async def chat_test_endpoint():
     # Simple fixed payload to exercise the full chat pipeline
     test_payload = ChatRequest(input="System test ping from /chat/test")
     return run_chat_pipeline(test_payload.input)
-    
-      
+
+
 # ----- Voice Endpoints (API-key protected) -----
-
-@app.get("/chat/test")
-async def chat_test():
-    """
-    Simple health check for Christ-ethics.
-    Returns a sample reply so we know the core is working.
-    """
-    sample_input = "I want revenge on someone who wronged me."
-    result = christlike_response(sample_input)
-    return {
-        "ok": True,
-        "sample_input": sample_input,
-        "sample_reply": result["reply"],
-        "timestamp": result.get("timestamp", datetime.utcnow().isoformat() + "Z"),
-    }
-
-
-
-from fastapi.responses import HTMLResponse, PlainTextResponse
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -952,6 +1027,7 @@ def respond_with_42(user_text: str) -> str:
 
     return f"{safe_out}{reasoning}"
 
+
 # --- Style Governor: Hard Clamp (No Metaphors, No Stories, No Parables) ---
 def enforce_style_governor(text: str) -> str:
     """
@@ -981,15 +1057,14 @@ def enforce_style_governor(text: str) -> str:
         if pat in lowered:
             # Strip entire sentence containing the phrase
             sentences = text.split(".")
-            cleaned_sentences = [
-                s for s in sentences if pat not in s.lower()
-            ]
+            cleaned_sentences = [s for s in sentences if pat not in s.lower()]
             text = ". ".join(cleaned_sentences).strip()
 
             lowered = text.lower()
 
     return text
-    
+
+
 def respond_with_42_oracle(user_text: str) -> str:
     """
     Simple Oracle persona for 42, with Christ-like tone clamps.
@@ -1073,7 +1148,7 @@ Default behavior:
         result_chars = []
         i = 0
         while i < len(cleaned):
-            segment = cleaned[i:i+7]
+            segment = cleaned[i:i + 7]
             if segment.lower() == "beloved":
                 i += 7
                 continue
@@ -1082,6 +1157,7 @@ Default behavior:
         cleaned = "".join(result_chars)
 
     return cleaned.strip()
+
 
 # -------------------------------------------------------------
 # NOW add the bridge code (AFTER respond_with_42 is fully closed)
@@ -1320,7 +1396,6 @@ def respond_with_42_oracle(user_text: str) -> str:
     cleaned = strip_disclaimers(raw)
 
     # Oracle upgrades (optional overlays)
-    from random import choice, random
     symbol = choice(ORACLE_SYMBOLS)
     parable = oracle_parable(symbol)
 
@@ -1348,21 +1423,95 @@ def respond_with_42_auto(user_text: str) -> str:
     return respond_with_42(user_text)
 
 
-# ------------- Web app setup (single FastAPI instance) -------------
-
-
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
-
-
 # === Core system health/version endpoints ===
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+def build_status_lines() -> list[str]:
+    now_utc = datetime.now(timezone.utc)
+
+    uptime_s = int(time.time() - APP_START_TS)
+    hh = uptime_s // 3600
+    mm = (uptime_s % 3600) // 60
+    ss = uptime_s % 60
+
+    app_version = os.getenv("APP_VERSION", "dev")
+    runtime = os.getenv("RUNTIME", "replit")
+    repl_id = os.getenv("REPL_ID") or os.getenv("REPL_SLUG") or "unknown"
+    host = os.getenv("HOST", "0.0.0.0")
+    port = os.getenv("PORT", "8000")
+
+    return [
+        "42 STATUS ✅",
+        f"time_utc: {now_utc.isoformat()}",
+        f"uptime: {hh:02d}h {mm:02d}m {ss:02d}s",
+        f"app_version: {app_version}",
+        f"runtime: {runtime}",
+        f"repl: {repl_id}",
+        f"bind: {host}:{port}",
+    ]
+
+# --- Fast intents (no LLM) ---
+
+def build_help_lines() -> list[str]:
+    return [
+        "42 HELP ✅",
+        "Commands:",
+        "- status (or /status) -> runtime status",
+        "- version (or /version) -> app version",
+        "- help (or /help) -> this help",
+        "- whoami (or /whoami) -> auth + client info",
+        "",
+        "API endpoints:",
+        "- GET /health",
+        "- GET /status",
+        "- GET /version",
+        "- GET /whoami",
+        "- POST /chat",
+    ]
+
+
+def fast_intent_reply(user_text: str) -> str | None:
+    raw = (user_text or "").strip()
+    if not raw:
+        return None
+
+    cmd = raw.lower()
+
+    # aliases
+    if cmd in ("status", "/status"):
+        return "\n".join(build_status_lines())
+
+    if cmd in ("help", "/help", "?"):
+        return "\n".join(build_help_lines())
+
+    if cmd in ("version", "/version"):
+        return f"42 VERSION ✅\n{os.getenv('APP_VERSION', 'dev')}"
+
+    # NEW: route these through the same fast-intent system
+    if cmd in ("about", "/about"):
+        # if you already have ABOUT text/const/function, use it here
+        return "\n".join(build_about_lines()) if "build_about_lines" in globals() else "42 ABOUT ✅"
+
+    if cmd in ("health", "/health"):
+        # keep it simple: we just return a short text health
+        return "ok"
+
+    return None
+
+
+@app.get("/help", response_class=PlainTextResponse)
+def help_get():
+    return "\n".join(build_help_lines())
+
+
+@app.get("/status/text", response_class=PlainTextResponse)
+async def status_text():
+    return "\n".join(build_status_lines())
+    
 
 
 @app.get("/version")
 def version():
     return {"app": "42", "rev": "0.1.0"}
+
 
 @app.post("/protection/test")
 async def protection_test(payload: ProtectionTestRequest):
@@ -1384,13 +1533,16 @@ async def protection_test(payload: ProtectionTestRequest):
         "notes": decision.notes,
     }
 
+
 class ChristReflectionRequest(BaseModel):
     text: str
+
 
 class ChristReflectionResponse(BaseModel):
     assessment: str
     cautions: list[str] = []
     guidance: list[str] = []
+
 
 @app.post("/christ/evaluate", response_model=ChristReflectionResponse)
 async def christ_evaluate(payload: ChristReflectionRequest):
@@ -1408,6 +1560,7 @@ async def christ_evaluate(payload: ChristReflectionRequest):
         "guidance": getattr(result, "guidance", []),
     }
 
+
 @app.post("/nina/test", response_model=NinaInsight)
 async def nina_test(payload: NinaTestRequest):
     """
@@ -1423,13 +1576,16 @@ async def nina_test(payload: NinaTestRequest):
     agency_flags: List[str] = []
 
     # Needs
-    if any(word in lowered for word in ["tired", "exhausted", "burned out", "drained"]):
+    if any(word in lowered
+           for word in ["tired", "exhausted", "burned out", "drained"]):
         needs.append("rest")
     if any(word in lowered for word in ["hungry", "starving", "food", "eat"]):
         needs.append("food")
-    if any(word in lowered for word in ["alone", "lonely", "ignored", "abandoned"]):
+    if any(word in lowered
+           for word in ["alone", "lonely", "ignored", "abandoned"]):
         needs.append("connection")
-    if any(word in lowered for word in ["unsafe", "scared", "afraid", "danger"]):
+    if any(word in lowered
+           for word in ["unsafe", "scared", "afraid", "danger"]):
         needs.append("safety")
 
     # Interests
@@ -1443,15 +1599,18 @@ async def nina_test(payload: NinaTestRequest):
     # Narrative flags
     if any(word in lowered for word in ["machine", "system", "simulation"]):
         narrative_flags.append("system_vs_self")
-    if any(word in lowered for word in ["test", "trial", "calling", "mission"]):
+    if any(word in lowered
+           for word in ["test", "trial", "calling", "mission"]):
         narrative_flags.append("calling/mission")
     if any(word in lowered for word in ["homeless", "shelter", "broke"]):
         narrative_flags.append("survival_arc")
 
     # Agency flags
-    if any(word in lowered for word in ["stuck", "trapped", "no choice", "forced"]):
+    if any(word in lowered
+           for word in ["stuck", "trapped", "no choice", "forced"]):
         agency_flags.append("low_agency_feeling")
-    if any(word in lowered for word in ["i decided", "i chose", "i will", "i'm going to"]):
+    if any(word in lowered
+           for word in ["i decided", "i chose", "i will", "i'm going to"]):
         agency_flags.append("high_agency_statement")
 
     # Fallbacks so we never return empty lists
@@ -1471,6 +1630,138 @@ async def nina_test(payload: NinaTestRequest):
         agency_flags=agency_flags,
     )
 
+@app.get("/whoami")
+async def whoami(request: Request):
+    """
+    Returns safe identity/debug info about the caller.
+    Does NOT leak secrets (only a fingerprint of SAFE-KEY).
+    Assumes your existing API-key middleware/dependency is already enforcing auth.
+    """
+    safe_key = request.headers.get("SAFE-KEY", "") or ""
+    has_key = bool(safe_key.strip())
+
+    # safe fingerprint (never return the full key)
+    key_fingerprint = None
+    if has_key:
+        sha = hashlib.sha256(safe_key.encode("utf-8")).hexdigest()
+        key_fingerprint = f"sha256:{sha[:12]}… last4:{safe_key[-4:]}"
+
+    # best-effort client IP (behind proxies this may be the proxy unless you trust X-Forwarded-For)
+    xff = request.headers.get("x-forwarded-for")
+    client_ip = (xff.split(",")[0].strip() if xff else None) or (request.client.host if request.client else None)
+
+    return {
+        "authenticated": True, # if they hit this endpoint, they passed your auth layer
+        "client_ip": client_ip,
+        "user_agent": request.headers.get("user-agent"),
+        "repl": os.getenv("REPL_ID") or os.getenv("REPL_SLUG") or "unknown",
+        "runtime": os.getenv("RUNTIME", "replit"),
+        "app_version": os.getenv("APP_VERSION", "dev"),
+        "safe_key_present": has_key,
+        "safe_key_fingerprint": key_fingerprint,
+    }
+
+@app.get("/live")
+async def live():
+    return {"alive": True}
+
+@app.get("/ready")
+def _bool_env(name: str) -> bool:
+    v = os.getenv(name, "")
+    return bool(v and v.strip())
+
+def _dir_ok(path: str) -> tuple[bool, str]:
+    try:
+        os.makedirs(path, exist_ok=True)
+        testfile = os.path.join(path, ".ready_write_test")
+        with open(testfile, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(testfile)
+        return True, path
+    except Exception as e:
+        return False, f"{path} ({type(e).__name__}: {e})"
+
+def _safe_check(fn, label: str) -> tuple[bool, str]:
+    try:
+        fn()
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+@app.get("/ready")
+async def ready(deep: bool = Query(False, description="If true, run deeper (still no-network) checks")):
+    """
+    Readiness: returns 200 only if we're safe to receive traffic.
+    - No network calls
+    - No heavy model warmup unless you explicitly want that (we still avoid it here)
+    """
+    checks: dict[str, dict[str, object]] = {}
+
+    # ---- Basic runtime checks (fast, no side effects) ----
+    checks["env"] = {
+        "app_version_present": _bool_env("APP_VERSION"),
+        "runtime_present": _bool_env("RUNTIME"),
+        "repl_id_present": _bool_env("REPL_ID") or _bool_env("REPL_SLUG"),
+    }
+
+    # SAFE_KEY presence (do not leak; just show if set)
+    checks["auth"] = {
+        "safe_key_configured": _bool_env("SAFE_KEY"),
+        "header_name": os.getenv("SAFE_KEY_HEADER_NAME", "SAFE-KEY"),
+    }
+
+    # ---- Filesystem sanity (common failure in Replit / containers) ----
+    # Adjust these dirs if your project uses different paths.
+    voice_cache_dir = os.path.join("assets", "voice_cache")
+    ok_vc, vc_detail = _dir_ok(voice_cache_dir)
+    checks["storage"] = {
+        "voice_cache_writable": ok_vc,
+        "voice_cache_dir": vc_detail,
+    }
+
+    # ---- Optional deeper checks (still no network calls) ----
+    if deep:
+        # Example: ensure key callables exist / import paths are valid
+        # (This catches refactor mistakes early.)
+        def _check_fast_intents():
+            assert callable(fast_intent_reply)
+
+        checks["imports"] = {}
+        ok, detail = _safe_check(_check_fast_intents, "fast_intent_reply")
+        checks["imports"]["fast_intent_reply_callable"] = ok
+        checks["imports"]["fast_intent_reply_detail"] = detail
+
+        # If you have a speech module already imported as speech_module, verify it’s present.
+        def _check_speech_module():
+            # no execution, just presence checks
+            assert speech_module is not None
+
+        ok, detail = _safe_check(_check_speech_module, "speech_module")
+        checks["imports"]["speech_module_present"] = ok
+        checks["imports"]["speech_module_detail"] = detail
+
+    # ---- Compute overall readiness ----
+    def _all_ok(obj) -> bool:
+        if isinstance(obj, dict):
+            return all(_all_ok(v) for v in obj.values())
+        if isinstance(obj, bool):
+            return obj
+        return True
+
+    overall_ok = _all_ok(checks)
+
+    payload = {
+        "ready": overall_ok,
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+
+    if not overall_ok:
+        raise HTTPException(status_code=503, detail=payload)
+
+    return payload
+
+
 # --- Minimal voice preview page & file endpoint ---
 VOICE_MP3 = os.path.join("assets", "voice_cache", "last_tts.mp3")
 
@@ -1481,13 +1772,13 @@ def voice_player():
     <html>
     <body style="font-family:sans-serif; padding:1rem;">
       <h3>Forty-Two — Latest Voice</h3>
-      <audio id="player" controls autoplay src="/voice/last"></audio>
+      <audio id="player" controls autoplay src="/voice/last/play"></audio>
       <p>If nothing plays yet, trigger a line in the app to generate speech.</p>
       <script>
         setInterval(() => {
           const a = document.getElementById('player');
           const t = Date.now();
-          a.src = '/voice/last?t=' + t;
+          a.src = '/voice/last/play?t=' + t;
           a.play().catch(() => {});
         }, 5000);
       </script>
@@ -1530,7 +1821,6 @@ if __name__ == "__main__" and len(sys.argv) > 1:
 
 # Otherwise continue normal execution (console/app mode)
 print("✅ Root main.py is running")
-
 
 # ---------------- Logging ----------------
 logger = logging.getLogger("bot42")
@@ -1926,12 +2216,40 @@ def banner() -> Dict[str, str]:
 
 
 @app.get("/status")
-def status() -> Dict[str, Any]:
+def status() -> dict:
     return {
-        "version": VERSION,
-        "cwd": os.getcwd(),
-        "project_root": PROJECT_ROOT,
-        "candidate_dirs": CANDIDATE_DIRS,
+        # identity / runtime
+        "entrypoint_module":
+        __name__,
+        "app_file":
+        __file__,
+        "version":
+        VERSION,
+
+        # time
+        "utc_now":
+        datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds":
+        int(time.time() - APP_START_TS),
+
+        # environment switches
+        "speech_enabled":
+        os.getenv("SPEECH_ENABLED", "1").strip().lower()
+        in ("1", "true", "yes", "y", "on"),
+        "chat_pipeline_debug":
+        os.getenv("CHAT_PIPELINE_DEBUG", "0").strip() == "1",
+        "log_level":
+        os.getenv("LOG_LEVEL", "INFO"),
+
+        # filesystem
+        "cwd":
+        os.getcwd(),
+        "project_root":
+        PROJECT_ROOT,
+        "candidate_dirs":
+        CANDIDATE_DIRS,
+
+        # system composition
         "modules": {
             "offense": HAS_OFFENSE,
             "infiltrate": INFILTRATE_RUN is not None,
@@ -2159,7 +2477,6 @@ def _console_loop() -> None:
 # FastAPI Application
 # ------------------------------
 
-
 # Mount feature routers
 try:
     from bot_42_core.features.api import router as law_router
@@ -2169,7 +2486,6 @@ except Exception as e:
     print(f"[law-api] not mounted: {e}")
 
 # in main.py (where FastAPI app is defined)
-
 
 try:
     # Preferred: real class that supports AI42(...)
@@ -2188,14 +2504,10 @@ except Exception:
         AI42 = None  # type: ignore
         print("[lawAI] bridge not loaded:", e)
 
-
-
 # === Core system health/version endpoints ===
 
 law_system = LawSystem()
 ai42 = AI42(law_system)
-
-
 
 
 @app.post("/safe")
@@ -2232,31 +2544,30 @@ def simulate(policy: str, trials: int = 200):
     # ---- Health & root (keeps Replit happy) ----
 @app.get("/")
 def root():
-        return {"ok": True, "service": "42"}
+    return {"ok": True, "service": "42"}
 
-    # ---- Lazy init: only initialize core when first needed ----
+# ---- Lazy init: only initialize core when first needed ----
 ai42 = None  # global handle
 
-def ensure_initialized():
-        """Initialize 42 core systems lazily (only when needed)."""
-        global ai42
-        if ai42 is not None:
-            return  # already initialized
-        try:
-            from bot_42_core.features.a42_bridge import initialize_42_core
-            print("🟢 Initializing 42 core system (lazy)...")
-            ai42 = initialize_42_core(
-            )  # boots Personality, Dispatcher, Storage, Law, etc.
-            print("✅ Initialization complete (lazy).")
-        except Exception as e:
-            print("[init] failed:", repr(e))
 
-    
-    # =====================================================================
+def ensure_initialized():
+    """Initialize 42 core systems lazily (only when needed)."""
+    global ai42
+    if ai42 is not None:
+        return  # already initialized
+    try:
+        from bot_42_core.features.a42_bridge import initialize_42_core
+        print("🟢 Initializing 42 core system (lazy)...")
+        ai42 = initialize_42_core(
+        )  # boots Personality, Dispatcher, Storage, Law, etc.
+        print("✅ Initialization complete (lazy).")
+    except Exception as e:
+        print("[init] failed:", repr(e))
+
+# =====================================================================
 
 
 # --- Law system wiring (flush-left, not indented) ---
-
 
 law_system = LawSystem()
 
@@ -2272,8 +2583,6 @@ else:
         ai42 = None
 
 # ===== Endpoints that rely on law_system / ai42 =====
-
-
 
 
 @app.get("/laws/conflicts")
@@ -2300,7 +2609,6 @@ print("DEBUG routes:", [r.path for r in app.routes])
 # Optional: show all registered routes for confirmation
 print("DEBUG routes:", [r.path for r in app.routes])
 # ---------- Bridge: Chat API ----------
-
 
 BRIDGE_KEY = os.getenv("BRIDGE_API_KEY", "")
 if not BRIDGE_KEY:
@@ -2393,8 +2701,6 @@ async def bridge_chat(payload: dict, x_api_key: str = Header(None)):
 
     return {"ok": True, "reply": reply, "session_id": sid, "tst": time.time()}
 
-    
-    
 
 if __name__ == "__main__":
     uvicorn.run(

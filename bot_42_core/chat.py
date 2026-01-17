@@ -9,6 +9,8 @@ from datetime import datetime
 # so we use relative imports below.
 from .features.ethics.christ_like import ChristLikeEvaluator
 from .why_log import why_log
+from bot_42_core.features.api import get_last_voice_meta
+
 
 # ============== terminal styling ==============
 def _supports_color() -> bool:
@@ -406,8 +408,6 @@ def main():
             resp = EXECUTE(msg)
             _last_raw = resp
 
-            resp = EXECUTE(msg)
-            _last_raw = resp
 
             # --- Christ-like ethics evaluation ---
             try:
@@ -422,12 +422,36 @@ def main():
                 else:
                     reply_text = str(resp)
 
-                verdict = _christ.evaluate(user_text, reply_text)
-                why_log(
-                    "chat_reply_eval",
-                    "Christ-like evaluation of reply",
-                    {"score": verdict.score, "messages": verdict.messages},
-                )
+                # --- Last voice awareness (natural) ---
+                voice_meta = None
+                try:
+                    voice_meta = get_last_voice_meta()
+                except Exception:
+                    voice_meta = None
+
+                if voice_meta and voice_meta.get("ok") and reply_text:
+                    vid = voice_meta.get("id") or voice_meta.get("file")
+                    vfile = voice_meta.get("file", "the last clip")
+                    ms = voice_meta.get("duration_ms")
+
+                    # Only mention it if it's actually a new clip (prevents repeating every turn)
+                    global _last_voice_seen_id
+                    try:
+                        _last_voice_seen_id
+                    except NameError:
+                        _last_voice_seen_id = None
+
+                    if vid and vid != _last_voice_seen_id:
+                        _last_voice_seen_id = vid
+
+                        # Keep it short + natural (no “meta”, no parentheses)
+                        if ms is not None:
+                            reply_text += f"\n\nI can replay what I just said ({vfile}, ~{ms} ms) if you want."
+                        else:
+                            reply_text += f"\n\nI can replay what I just said ({vfile}) if you want."
+
+
+
 
                 if verdict.score < MIN_SCORE:
                     print(f"{C.warn}[Ethics Gate]{C.reset} Christ-like score low: {verdict.score:.2f}")

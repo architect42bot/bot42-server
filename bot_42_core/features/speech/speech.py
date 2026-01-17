@@ -16,6 +16,27 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .. import storage_manager
+import json
+# Configuration
+SPEECH_DIR: Path = storage_manager.BASE_DIR / "logs" / "speech"
+SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+
+SPEECH_LOG_PATH = SPEECH_DIR / "speech_log.jsonl"
+
+
+def _append_speech_log(rec: dict) -> None:
+    """
+    Append one JSON line to the speech log.
+    Never raises (logging must not break synthesis).
+    """
+    try:
+        SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+        rec = dict(rec)
+        rec.setdefault("ts", datetime.utcnow().isoformat())
+        with open(SPEECH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 # -------------------------------------------------------------------
 # Configuration
@@ -24,6 +45,7 @@ from .. import storage_manager
 # Speech log directory (<BASE_DIR>/logs/speech)
 SPEECH_DIR: Path = storage_manager.BASE_DIR / "logs" / "speech"
 SPEECH_DIR.mkdir(parents=True, exist_ok=True)
+SPEECH_LOG_PATH = SPEECH_DIR / "speech_log.jsonl"
 
 # Recognized formats (primarily for listing / future expansion)
 AUDIO_EXTS: Tuple[str, ...] = (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac")
@@ -217,6 +239,7 @@ def speech_test():
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     file_path = SPEECH_DIR / f"test_{ts}.wav"
+    speech_id = file_path.stem
     file_path.write_bytes(_silence_wav_bytes(duration_s=1.0, sample_rate=16000))
     return {"ok": True, "file": file_path.name, "id": file_path.stem}
 
@@ -241,6 +264,7 @@ def speak_say(payload: dict = Body(...)):
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     file_path = SPEECH_DIR / f"say_{ts}.wav"
+    speech_id = file_path.stem
 
     wav_bytes = tts_wav_bytes(text=text, voice=voice, rate=rate)
 
@@ -249,7 +273,16 @@ def speak_say(payload: dict = Body(...)):
         raise HTTPException(status_code=500, detail="TTS returned empty/too-small audio")
 
     file_path.write_bytes(wav_bytes)
-
+    _append_speech_log({
+        "kind": "say",
+        "id": speech_id,
+        "file": file_path.name,
+        "path": str(file_path),
+        "voice": voice,
+        "rate": rate,
+        "bytes": len(wav_bytes),
+    })
+    
     return {"ok": True, "file": file_path.name, "id": file_path.stem, "voice": voice, "rate": rate}
 
 
